@@ -1,0 +1,143 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: HIPAA Genomic Landing Zone - IAM Stack
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+  ProjectName:
+    Type: String
+    Default: hipaa-genomic-landing-zone
+
+Resources:
+
+  # PERMISSION BOUNDARY
+  # Think of this as a hard ceiling on what any role in this project
+  # can ever do - even if someone accidentally attaches AdministratorAccess
+  # later. The boundary wins. This is what makes the architecture
+  # enterprise-credible and satisfies HIPAA minimum necessary standard.
+  GenomicProjectBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${ProjectName}-${Environment}-boundary
+      Description: Permission boundary - caps all project roles to S3 and KMS only
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowS3AndKMSOnly
+            Effect: Allow
+            Action:
+              - s3:*
+              - kms:Decrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: "*"
+
+  # SEQUENCER INGEST ROLE
+  # This role is assumed by the DataSync agent running on-prem next
+  # to the sequencer. It can PUT files into S3 but cannot GET or DELETE.
+  # Write-only at the IAM layer + encrypt-only at the KMS layer =
+  # two independent controls protecting the same data.
+  SequencerIngestRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: SequencerIngestRole
+      Description: Assumed by DataSync agent to deposit raw genomic files into S3
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - datasync.amazonaws.com
+                - transfer.amazonaws.com
+            Action: sts:AssumeRole
+      PermissionsBoundary: !Ref GenomicProjectBoundary
+      Policies:
+        - PolicyName: SequencerIngestPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Write genomic files - no read, no delete
+              - Sid: AllowS3PutOnly
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub arn:aws:s3:::${ProjectName}-${Environment}-landing
+                  - !Sub arn:aws:s3:::${ProjectName}-${Environment}-landing/*
+              # KMS encrypt only - cannot decrypt existing data
+              - Sid: AllowKMSEncrypt
+                Effect: Allow
+                Action:
+                  - kms:GenerateDataKey
+                  - kms:Encrypt
+                  - kms:DescribeKey
+                Resource: "*"
+
+  # GENOMICS ANALYST ROLE
+  # Assumed by researchers and bioinformatics pipelines.
+  # Read-only - GetObject but no PutObject, no Delete.
+  # Combined with KMS Decrypt-only, this role cannot
+  # write a single byte to the landing zone.
+  GenomicsAnalystRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: GenomicsAnalystRole
+      Description: Read-only access to genomic landing zone for analysts
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: sts:AssumeRole
+      PermissionsBoundary: !Ref GenomicProjectBoundary
+      Policies:
+        - PolicyName: GenomicsAnalystPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Read genomic files - no write, no delete
+              - Sid: AllowS3ReadOnly
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub arn:aws:s3:::${ProjectName}-${Environment}-landing
+                  - !Sub arn:aws:s3:::${ProjectName}-${Environment}-landing/*
+              # KMS decrypt only - cannot generate new keys
+              - Sid: AllowKMSDecryptOnly
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource: "*"
+
+Outputs:
+  SequencerIngestRoleArn:
+    Description: ARN of the sequencer ingest role
+    Value: !GetAtt SequencerIngestRole.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-SequencerIngestRoleArn
+
+  GenomicsAnalystRoleArn:
+    Description: ARN of the genomics analyst role
+    Value: !GetAtt GenomicsAnalystRole.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-GenomicsAnalystRoleArn
+
+  BoundaryArn:
+    Description: ARN of the permission boundary
+    Value: !Ref GenomicProjectBoundary
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-BoundaryArn
+      

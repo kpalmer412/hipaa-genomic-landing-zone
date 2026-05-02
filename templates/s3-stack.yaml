@@ -1,0 +1,132 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: HIPAA Genomic Landing Zone - S3 Stack
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    # Lets us deploy dev/staging/prod from the same template
+
+  ProjectName:
+    Type: String
+    Default: hipaa-genomic-landing-zone
+    # Used to name every resource consistently
+
+Resources:
+
+  GenomicLandingBucket:
+    Type: AWS::S3::Bucket
+    # This is the actual S3 bucket resource
+
+    Properties:
+      BucketName: !Sub ${ProjectName}-${Environment}-landing
+      # Name is built from parameters - hipaa-genomic-landing-zone-dev-landing
+
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !ImportValue hipaa-genomic-landing-zone-dev-KeyArn
+              # This is where the KMS stack connects to the S3 stack
+              # ImportValue pulls the KeyArn export we saw in the table
+              # CloudFormation enforces this dependency at deploy time
+            BucketKeyEnabled: true
+            # BucketKeyEnabled reduces KMS API calls by 99%
+            # Without it every S3 GET/PUT calls KMS directly - expensive at scale
+
+      VersioningConfiguration:
+        Status: Enabled
+        # Versioning keeps every version of every file
+        # Required for Object Lock and critical for HIPAA audit trails
+        # If a file is overwritten you can recover the original
+
+      ObjectLockEnabled: true
+      # Object Lock = WORM storage (Write Once Read Many)
+      # Once a file is written it cannot be deleted or overwritten
+      # during the retention period - satisfies HIPAA integrity controls
+      # §164.312(c)(1) and CAP/CLIA audit requirements
+
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: 2555
+            # GOVERNANCE mode = designated admins can override with explicit permission
+            # COMPLIANCE mode = nobody can delete, not even root - use for prod
+            # 2555 days = 7 years - standard HIPAA retention requirement
+
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+        # All four must be true - this is the Config rule we will add later
+        # One misconfigured setting and genomic data becomes public
+        # This block overrides any accidental public ACL at the object level
+
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: HIPAAControlled
+          Value: "true"
+        - Key: DataClassification
+          Value: GenomicPHI
+          # Tags are how you find and audit resources at scale
+          # HIPAAControlled and DataClassification tags are searchable
+          # in AWS Config and Security Hub
+
+  GenomicBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    # Bucket policy = resource-based policy attached directly to the bucket
+    # This is separate from IAM - both must allow an action for it to succeed
+    # If either denies, access is blocked
+
+    Properties:
+      Bucket: !Ref GenomicLandingBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+
+          - Sid: DenyNonKMSUploads
+            Effect: Deny
+            Principal: "*"
+            Action: s3:PutObject
+            Resource: !Sub arn:aws:s3:::${ProjectName}-${Environment}-landing/*
+            Condition:
+              StringNotEquals:
+                s3:x-amz-server-side-encryption: aws:kms
+            # Denies any upload that is not KMS encrypted
+            # Even if someone has IAM permission to PutObject
+            # they cannot upload an unencrypted file - period
+            # This is enforcement at the bucket level not the role level
+
+          - Sid: DenyHTTP
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !Sub arn:aws:s3:::${ProjectName}-${Environment}-landing
+              - !Sub arn:aws:s3:::${ProjectName}-${Environment}-landing/*
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+            # Denies all requests that do not use HTTPS/TLS
+            # Satisfies HIPAA §164.312(e)(2)(ii) encryption in transit
+            # No unencrypted data can move to or from this bucket
+
+Outputs:
+  BucketName:
+    Description: Genomic landing bucket name
+    Value: !Ref GenomicLandingBucket
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-BucketName
+
+  BucketArn:
+    Description: Genomic landing bucket ARN
+    Value: !GetAtt GenomicLandingBucket.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-BucketArn
+      

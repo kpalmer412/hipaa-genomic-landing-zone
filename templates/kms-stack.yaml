@@ -1,0 +1,61 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: HIPAA Genomic Landing Zone - KMS Stack
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+  ProjectName:
+    Type: String
+    Default: hipaa-genomic-landing-zone
+
+Resources:
+  GenomicDataKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: CMK for genomic data encryption
+      EnableKeyRotation: true
+      KeyUsage: ENCRYPT_DECRYPT
+      KeySpec: SYMMETRIC_DEFAULT
+      PendingWindowInDays: 7
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: genomic-key-policy
+        Statement:
+          - Sid: AllowRootAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: "*"
+          - Sid: AllowSequencerIngest
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:role/SequencerIngestRole
+            Action:
+              - kms:GenerateDataKey
+              - kms:Encrypt
+              - kms:DescribeKey
+            Resource: "*"
+          - Sid: AllowAnalystDecryptOnly
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:role/GenomicsAnalystRole
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            Resource: "*"
+
+  GenomicDataKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/${ProjectName}-${Environment}
+      TargetKeyId: !Ref GenomicDataKey
+
+Outputs:
+  KeyArn:
+    Description: KMS Key ARN
+    Value: !GetAtt GenomicDataKey.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-KeyArn
+      
