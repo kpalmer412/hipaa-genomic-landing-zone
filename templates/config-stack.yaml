@@ -1,0 +1,124 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: HIPAA Genomic Landing Zone - Config Stack
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+  ProjectName:
+    Type: String
+    Default: hipaa-genomic-landing-zone
+
+Resources:
+
+  ComplianceAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${ProjectName}-${Environment}-compliance-alerts
+      DisplayName: HIPAA Genomic Landing Zone Compliance Alerts
+
+  ComplianceAlertTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref ComplianceAlertTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowConfigToPublish
+            Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref ComplianceAlertTopic
+
+  ConfigRecorderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-config-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWS_ConfigRole
+
+  ConfigRecorder:
+    Type: AWS::Config::ConfigurationRecorder
+    DependsOn:
+      - ConfigRecorderRole
+      - ComplianceAlertTopic
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-recorder
+      RecordingGroup:
+        AllSupported: false
+        ResourceTypes:
+          - AWS::S3::Bucket
+          - AWS::KMS::Key
+          - AWS::IAM::Role
+          - AWS::IAM::Policy
+      RoleARN: !GetAtt ConfigRecorderRole.Arn
+
+  ConfigDeliveryChannel:
+    Type: AWS::Config::DeliveryChannel
+    DependsOn: ConfigRecorder
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-delivery
+      S3BucketName: !Sub ${ProjectName}-${Environment}-landing
+      SnsTopicARN: !Ref ComplianceAlertTopic
+
+  S3PublicReadRule:
+    Type: AWS::Config::ConfigRule
+    DependsOn: ConfigRecorder
+    Properties:
+      ConfigRuleName: !Sub ${ProjectName}-${Environment}-s3-no-public-read
+      Description: Checks that S3 buckets do not allow public read access
+      Source:
+        Owner: AWS
+        SourceIdentifier: S3_BUCKET_PUBLIC_READ_PROHIBITED
+
+  S3PublicWriteRule:
+    Type: AWS::Config::ConfigRule
+    DependsOn: ConfigRecorder
+    Properties:
+      ConfigRuleName: !Sub ${ProjectName}-${Environment}-s3-no-public-write
+      Description: Checks that S3 buckets do not allow public write access
+      Source:
+        Owner: AWS
+        SourceIdentifier: S3_BUCKET_PUBLIC_WRITE_PROHIBITED
+
+  S3EncryptionRule:
+    Type: AWS::Config::ConfigRule
+    DependsOn: ConfigRecorder
+    Properties:
+      ConfigRuleName: !Sub ${ProjectName}-${Environment}-s3-encryption-required
+      Description: Checks that S3 buckets have server side encryption enabled
+      Source:
+        Owner: AWS
+        SourceIdentifier: S3_BUCKET_SERVER_SIDE_ENCRYPTION_ENABLED
+
+  KMSRotationRule:
+    Type: AWS::Config::ConfigRule
+    DependsOn: ConfigRecorder
+    Properties:
+      ConfigRuleName: !Sub ${ProjectName}-${Environment}-kms-rotation-required
+      Description: Checks that KMS customer managed keys have rotation enabled
+      Source:
+        Owner: AWS
+        SourceIdentifier: CMK_BACKING_KEY_ROTATION_ENABLED
+
+Outputs:
+  ComplianceAlertTopicArn:
+    Description: SNS topic ARN for compliance alerts
+    Value: !Ref ComplianceAlertTopic
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-ComplianceTopicArn
+
+  ConfigRecorderName:
+    Description: Config recorder name
+    Value: !Ref ConfigRecorder
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-ConfigRecorderName

@@ -1,0 +1,91 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: HIPAA Genomic Landing Zone - CloudTrail Stack
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+  ProjectName:
+    Type: String
+    Default: hipaa-genomic-landing-zone
+
+Resources:
+
+  CloudTrailLogBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ProjectName}-${Environment}-cloudtrail-logs
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: CloudTrailAuditLogs
+
+  CloudTrailLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DependsOn: CloudTrailLogBucket
+    Properties:
+      Bucket: !Ref CloudTrailLogBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt CloudTrailLogBucket.Arn
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub ${CloudTrailLogBucket.Arn}/AWSLogs/${AWS::AccountId}/CloudTrail/*
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+
+  # Custom resource adds a 15 second pause after bucket policy
+  # before CloudTrail attempts to validate it
+  # This solves the propagation timing issue
+  BucketPolicyWait:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  CloudTrailTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn:
+      - CloudTrailLogBucketPolicy
+      - BucketPolicyWait
+    Properties:
+      TrailName: !Sub ${ProjectName}-${Environment}-trail
+      S3BucketName: !Ref CloudTrailLogBucket
+      IsLogging: true
+      IsMultiRegionTrail: true
+      EnableLogFileValidation: true
+      IncludeGlobalServiceEvents: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: HIPAAControl
+          Value: AuditControls-164.312b
+
+Outputs:
+  TrailArn:
+    Description: CloudTrail trail ARN
+    Value: !GetAtt CloudTrailTrail.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-TrailArn
+
+  CloudTrailLogBucketName:
+    Description: CloudTrail log bucket name
+    Value: !Ref CloudTrailLogBucket
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-CloudTrailBucketName
+      

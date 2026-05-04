@@ -140,4 +140,3 @@ Outputs:
     Value: !Ref GenomicProjectBoundary
     Export:
       Name: !Sub ${ProjectName}-${Environment}-BoundaryArn
-      
